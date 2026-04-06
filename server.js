@@ -5,37 +5,47 @@ const io = require('socket.io')(process.env.PORT || 3000, {
 let users = [];
 
 io.on('connection', (socket) => {
-    console.log('Un utilisateur arrive');
+    console.log('Nouvelle connexion socket');
 
-    // Quand l'utilisateur rejoint avec son ID PeerJS et son genre
+    // 1. L'utilisateur rejoint avec son ID Peer et son sexe
     socket.on('join', (peerId, gender) => {
+        // Sécurité : on évite les doublons
+        users = users.filter(u => u.id !== peerId);
+        
         socket.peerId = peerId;
-        socket.gender = gender; 
-        users.push({ id: peerId, gender: gender, socketId: socket.id });
-        console.log(`Utilisateur ${peerId} (${gender}) ajouté.`);
+        socket.gender = gender || 'non spécifié'; 
+
+        users.push({ 
+            id: peerId, 
+            gender: socket.gender, 
+            socketId: socket.id 
+        });
+        
+        console.log(`Utilisateur ${peerId} est un ${socket.gender}. (Total: ${users.length})`);
     });
 
-    // Quand l'utilisateur clique sur "SUIVANT"
-    socket.on('requestNext', (targetGender) => {
-        // On cherche les autres, sauf nous-même
+    // 2. L'utilisateur demande un nouveau partenaire
+    socket.on('requestNext', () => {
+        // Filtre pour ne pas tomber sur soi-même
         let potentialMatches = users.filter(u => u.socketId !== socket.id);
 
-        // Si l'utilisateur est Premium et veut des filles
-        if (targetGender === 'female') {
-            potentialMatches = potentialMatches.filter(u => u.gender === 'female');
-        }
-
         if (potentialMatches.length > 0) {
+            // Choix aléatoire
             const randomUser = potentialMatches[Math.floor(Math.random() * potentialMatches.length)];
-            socket.emit('match', randomUser.id);
+            
+            // ON ENVOIE L'OBJET AVEC ID ET GENDER AU PARTENAIRE
+            console.log(`Matching ${socket.peerId} avec ${randomUser.id} (${randomUser.gender})`);
+            socket.emit('match', { 
+                id: randomUser.id, 
+                gender: randomUser.gender 
+            });
         } else {
-            socket.emit('error', 'Personne de disponible...');
+            socket.emit('error', 'Personne en ligne...');
         }
     });
 
-    // Quand quelqu'un part
     socket.on('disconnect', () => {
         users = users.filter(u => u.socketId !== socket.id);
-        console.log('Un utilisateur est parti');
+        console.log(`Déconnexion. (Restants: ${users.length})`);
     });
 });
