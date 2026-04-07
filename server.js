@@ -1,51 +1,55 @@
 const http = require('http');
 const server = http.createServer();
-const io = require('socket.io')(server, {
-    cors: { origin: "*" }
-});
+const io = require('socket.io')(server, { cors: { origin: "*" } });
 
-let users = [];
+// On stocke les utilisateurs connectés : { pseudo: socketId, peerId: peerId }
+let onlineUsers = {}; 
 
 io.on('connection', (socket) => {
-    console.log('Nouveau client connecté:', socket.id);
+    console.log('Connexion:', socket.id);
 
-    // L'utilisateur rejoint la file d'attente
-    socket.on('join', (peerId, gender) => {
-        users = users.filter(u => u.socketId !== socket.id);
-        users.push({ 
-            id: peerId, 
-            gender: gender || 'inconnu', 
-            socketId: socket.id 
-        });
+    // 1. S'enregistrer avec un Pseudo
+    socket.on('register_user', (pseudo, peerId) => {
+        socket.pseudo = pseudo;
         socket.peerId = peerId;
-        socket.gender = gender;
-        console.log(`Utilisateur prêt: ${peerId}. Total en ligne: ${users.length}`);
+        onlineUsers[pseudo] = { socketId: socket.id, peerId: peerId };
+        console.log(`${pseudo} est en ligne.`);
+        socket.emit('status_update', `Connecté en tant que ${pseudo}`);
     });
 
-    // L'utilisateur demande le partenaire suivant
+    // 2. Chat Aléatoire (existant)
     socket.on('requestNext', () => {
-        console.log(`Demande de match de: ${socket.peerId}`);
-        const others = users.filter(u => u.socketId !== socket.id);
-
+        const others = Object.keys(onlineUsers).filter(p => p !== socket.pseudo);
         if (others.length > 0) {
-            const partner = others[Math.floor(Math.random() * others.length)];
-            console.log(`Match trouvé: ${socket.peerId} <-> ${partner.id}`);
-
-            // On envoie les infos de connexion aux DEUX
-            socket.emit('match', { id: partner.id, gender: partner.gender });
-            io.to(partner.socketId).emit('match', { id: socket.peerId, gender: socket.gender });
+            const partnerPseudo = others[Math.floor(Math.random() * others.length)];
+            const partner = onlineUsers[partnerPseudo];
+            socket.emit('match', { id: partner.peerId, pseudo: partnerPseudo });
         } else {
-            socket.emit('error', 'En attente d\'un partenaire...');
+            socket.emit('error', 'Personne de disponible...');
+        }
+    });
+
+    // 3. Message Privé / Ajouter Ami
+    socket.on('private_message', ({ toPseudo, message }) => {
+        const target = onlineUsers[toPseudo];
+        if (target) {
+            io.to(target.socketId).emit('new_private_msg', {
+                from: socket.pseudo,
+                message: message,
+                peerId: socket.peerId // Pour pouvoir lancer un appel vidéo direct
+            });
+        } else {
+            socket.emit('error', 'Utilisateur hors ligne');
         }
     });
 
     socket.on('disconnect', () => {
-        users = users.filter(u => u.socketId !== socket.id);
-        console.log('Déconnexion, reste:', users.length);
+        if (socket.pseudo) {
+            delete onlineUsers[socket.pseudo];
+            console.log(`${socket.pseudo} est parti.`);
+        }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Serveur actif sur le port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Serveur Social sur port ${PORT}`));
