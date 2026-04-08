@@ -130,3 +130,51 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Serveur Cococho démarré sur le port ${PORT}`);
 });
+
+
+// En haut du fichier, crée un objet pour stocker les bannis
+let bannedUsers = {}; // Structure: { "Pseudo": timestamp_fin_ban }
+
+// ... dans io.on('connection', (socket) => { ...
+
+    socket.on('register_user', ({ pseudo, peerId, gender, isPremium }) => {
+        // VÉRIFICATION DU BAN
+        if (bannedUsers[pseudo] && bannedUsers[pseudo] > Date.now()) {
+            const minutesRestantes = Math.ceil((bannedUsers[pseudo] - Date.now()) / 60000);
+            return socket.emit('error', `Vous êtes banni pour encore ${minutesRestantes} minutes.`);
+        }
+        
+        // ... reste de ton code register_user ...
+        // Initialise le compteur de reports s'il n'existe pas
+        if (!onlineUsers[pseudo]) {
+            onlineUsers[pseudo] = { ..., reports: 0 };
+        }
+    });
+
+    socket.on('report_user', ({ targetPseudo }) => {
+        const target = onlineUsers[targetPseudo];
+        if (target) {
+            target.reports = (target.reports || 0) + 1;
+            console.log(`⚠️ ${targetPseudo} a reçu un signalement (${target.reports}/15)`);
+
+            if (target.reports >= 15) {
+                // BAN DE 2 HEURES
+                const duration = 2 * 60 * 60 * 1000; // 2h en millisecondes
+                bannedUsers[targetPseudo] = Date.now() + duration;
+                
+                io.to(target.socketId).emit('error', 'Vous avez été banni pour 2 heures suite à 15 signalements.');
+                io.to(target.socketId).emit('partner_disconnected');
+                
+                // Déconnexion forcée
+                const s = io.sockets.sockets.get(target.socketId);
+                if (s) s.disconnect();
+                
+                delete onlineUsers[targetPseudo];
+                console.log(`🚫 ${targetPseudo} est banni pour 2h.`);
+            } else {
+                // Juste un avertissement et zap
+                io.to(target.socketId).emit('partner_disconnected');
+                socket.emit('status_update', 'Utilisateur signalé. Recherche d\'un nouveau partenaire...');
+            }
+        }
+    });
