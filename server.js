@@ -2,179 +2,138 @@ const http = require('http');
 const server = http.createServer();
 const io = require('socket.io')(server, {
     cors: {
-        origin: "*", // Autorise les connexions depuis Hostinger
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
 
-// Base de données temporaire en mémoire
-// Structure : { "Pseudo": { socketId, peerId, gender, isPremium, currentPartner } }
 let onlineUsers = {};
+let bannedUsers = {}; // Stockage des bannis : { "Pseudo": timestamp_fin_ban }
 
 io.on('connection', (socket) => {
-    console.log('Nouvelle connexion socket:', socket.id);
+    console.log('Nouveau visiteur :', socket.id);
 
-    // 1. ENREGISTREMENT DE L'UTILISATEUR
+    // 1. ENREGISTREMENT
     socket.on('register_user', ({ pseudo, peerId, gender, isPremium }) => {
         if (!pseudo || !peerId) return;
+
+        // VÉRIFICATION DU BAN
+        if (bannedUsers[pseudo] && bannedUsers[pseudo] > Date.now()) {
+            const minutesRestantes = Math.ceil((bannedUsers[pseudo] - Date.now()) / 60000);
+            return socket.emit('error', `Accès refusé. Vous êtes banni pour encore ${minutesRestantes} minutes.`);
+        }
 
         socket.pseudo = pseudo;
         socket.peerId = peerId;
         socket.gender = gender || 'other';
         socket.isPremium = isPremium || false;
 
+        // Initialisation propre de l'utilisateur
         onlineUsers[pseudo] = {
             socketId: socket.id,
             peerId: peerId,
             gender: socket.gender,
             isPremium: socket.isPremium,
-            currentPartner: null
+            currentPartner: null,
+            reports: onlineUsers[pseudo] ? onlineUsers[pseudo].reports : 0 // Garde les reports si reconnexion
         };
 
-        console.log(`✅ ${pseudo} (${socket.gender}) est en ligne. Premium: ${socket.isPremium}`);
-        socket.emit('status_update', `Bienvenue ${pseudo}, vous êtes prêt.`);
+        console.log(`✅ ${pseudo} est en ligne. Premium: ${socket.isPremium}`);
     });
 
-    // 2. LOGIQUE DE MATCHING (ALÉATOIRE + FILTRE PREMIUM)
+    // 2. LOGIQUE DE MATCHING
     socket.on('requestNext', (filter) => {
-        if (!socket.pseudo) return;
+        if (!socket.pseudo || !onlineUsers[socket.pseudo]) return;
 
-        // On cherche des partenaires disponibles (pas soi-même et pas déjà en chat)
+        const myData = onlineUsers[socket.pseudo];
+        
+        // Libérer le partenaire actuel
+        if (myData.currentPartner) {
+            const oldPartner = onlineUsers[myData.currentPartner];
+            if (oldPartner) {
+                io.to(oldPartner.socketId).emit('partner_disconnected');
+                oldPartner.currentPartner = null;
+            }
+            myData.currentPartner = null;
+        }
+
         let candidates = Object.keys(onlineUsers).filter(p => 
             p !== socket.pseudo && onlineUsers[p].currentPartner === null
         );
 
-        // Application du filtre si l'utilisateur est Premium
         if (socket.isPremium && filter && filter !== 'all') {
             candidates = candidates.filter(p => onlineUsers[p].gender === filter);
         }
 
         if (candidates.length > 0) {
-            // Sélection aléatoire d'un partenaire parmi les candidats
             const partnerPseudo = candidates[Math.floor(Math.random() * candidates.length)];
             const partner = onlineUsers[partnerPseudo];
 
-            // Mise à jour des statuts pour éviter qu'ils soient matchés ailleurs
             onlineUsers[socket.pseudo].currentPartner = partnerPseudo;
             onlineUsers[partnerPseudo].currentPartner = socket.pseudo;
 
-            // On envoie les infos aux deux utilisateurs
-            // Vers l'appelant
-            socket.emit('match', {
-                id: partner.peerId,
-                pseudo: partnerPseudo,
-                gender: partner.gender
-            });
-
-            // Vers le partenaire trouvé
-            io.to(partner.socketId).emit('match', {
-                id: socket.peerId,
-                pseudo: socket.pseudo,
-                gender: socket.gender
-            });
-
-            console.log(`🔗 Match: ${socket.pseudo} <-> ${partnerPseudo}`);
+            socket.emit('match', { id: partner.peerId, pseudo: partnerPseudo, gender: partner.gender });
+            io.to(partner.socketId).emit('match', { id: socket.peerId, pseudo: socket.pseudo, gender: socket.gender });
         } else {
-            socket.emit('error', 'Aucun partenaire disponible pour le moment...');
+            socket.emit('error', 'Recherche en cours...');
         }
     });
 
-    // 3. MESSAGES PRIVÉS (CHAT TEXTUEL)
+    // 3. SYSTÈME DE SIGNALEMENT (BAN AUTOMATIQUE)
+    socket.on('report_user', ({ targetPseudo }) => {
+        const target = onlineUsers[targetPseudo];
+        const reporter = onlineUsers[socket.pseudo];
+
+        if (target && reporter) {
+            // Un signalement Premium compte pour 3 points, un gratuit pour 1
+            const points = reporter.isPremium ? 3 : 1;
+            target.reports = (target.reports || 0) + points;
+            
+            console.log(`⚠️ ${targetPseudo} signalé par ${socket.pseudo} (+${points} pts). Total: ${target.reports}/15`);
+
+            if (target.reports >= 15) {
+                const duration = 2 * 60 * 60 * 1000; // 2 heures
+                bannedUsers[targetPseudo] = Date.now() + duration;
+                
+                io.to(target.socketId).emit('error', 'Banni pour 2 heures (limite de signalements atteinte).');
+                
+                const s = io.sockets.sockets.get(target.socketId);
+                if (s) s.disconnect();
+                
+                delete onlineUsers[targetPseudo];
+                console.log(`🚫 BAN : ${targetPseudo} pour 2h.`);
+            } else {
+                // On sépare les deux immédiatement
+                io.to(target.socketId).emit('partner_disconnected');
+                socket.emit('status_update', 'Signalement pris en compte.');
+            }
+        }
+    });
+
+    // 4. MESSAGES PRIVÉS
     socket.on('private_message', ({ toPseudo, message }) => {
-        if (!message || message.trim() === "") return;
-        
         const target = onlineUsers[toPseudo];
-        if (target) {
+        if (target && message) {
             io.to(target.socketId).emit('new_private_msg', {
                 from: socket.pseudo,
                 message: message.trim(),
-                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                time: new Date().toLocaleTimeString()
             });
-        } else {
-            socket.emit('error', "L'utilisateur est déconnecté.");
-        }
-    });
-
-    // 4. SIGNAL DE FIN DE CHAT (ZAP)
-    socket.on('stopChat', () => {
-        const myData = onlineUsers[socket.pseudo];
-        if (myData && myData.currentPartner) {
-            const partner = onlineUsers[myData.currentPartner];
-            if (partner) {
-                io.to(partner.socketId).emit('partner_disconnected');
-                partner.currentPartner = null;
-            }
-            myData.currentPartner = null;
         }
     });
 
     // 5. DÉCONNEXION
     socket.on('disconnect', () => {
         if (socket.pseudo) {
-            // Si l'utilisateur était en chat, on prévient son partenaire
             const myData = onlineUsers[socket.pseudo];
             if (myData && myData.currentPartner) {
                 const partner = onlineUsers[myData.currentPartner];
-                if (partner) {
-                    io.to(partner.socketId).emit('partner_disconnected');
-                    partner.currentPartner = null;
-                }
+                if (partner) io.to(partner.socketId).emit('partner_disconnected');
             }
             delete onlineUsers[socket.pseudo];
-            console.log(`❌ ${socket.pseudo} a quitté le site.`);
         }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`🚀 Serveur Cococho démarré sur le port ${PORT}`);
-});
-
-
-// En haut du fichier, crée un objet pour stocker les bannis
-let bannedUsers = {}; // Structure: { "Pseudo": timestamp_fin_ban }
-
-// ... dans io.on('connection', (socket) => { ...
-
-    socket.on('register_user', ({ pseudo, peerId, gender, isPremium }) => {
-        // VÉRIFICATION DU BAN
-        if (bannedUsers[pseudo] && bannedUsers[pseudo] > Date.now()) {
-            const minutesRestantes = Math.ceil((bannedUsers[pseudo] - Date.now()) / 60000);
-            return socket.emit('error', `Vous êtes banni pour encore ${minutesRestantes} minutes.`);
-        }
-        
-        // ... reste de ton code register_user ...
-        // Initialise le compteur de reports s'il n'existe pas
-        if (!onlineUsers[pseudo]) {
-            onlineUsers[pseudo] = { ..., reports: 0 };
-        }
-    });
-
-    socket.on('report_user', ({ targetPseudo }) => {
-        const target = onlineUsers[targetPseudo];
-        if (target) {
-            target.reports = (target.reports || 0) + 1;
-            console.log(`⚠️ ${targetPseudo} a reçu un signalement (${target.reports}/15)`);
-
-            if (target.reports >= 15) {
-                // BAN DE 2 HEURES
-                const duration = 2 * 60 * 60 * 1000; // 2h en millisecondes
-                bannedUsers[targetPseudo] = Date.now() + duration;
-                
-                io.to(target.socketId).emit('error', 'Vous avez été banni pour 2 heures suite à 15 signalements.');
-                io.to(target.socketId).emit('partner_disconnected');
-                
-                // Déconnexion forcée
-                const s = io.sockets.sockets.get(target.socketId);
-                if (s) s.disconnect();
-                
-                delete onlineUsers[targetPseudo];
-                console.log(`🚫 ${targetPseudo} est banni pour 2h.`);
-            } else {
-                // Juste un avertissement et zap
-                io.to(target.socketId).emit('partner_disconnected');
-                socket.emit('status_update', 'Utilisateur signalé. Recherche d\'un nouveau partenaire...');
-            }
-        }
-    });
+server.listen(PORT, () => console.log(`🚀 Serveur Cococho prêt sur le port ${PORT}`));
