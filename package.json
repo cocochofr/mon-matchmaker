@@ -1,7 +1,7 @@
 {
   "name": "mon-matchmaker",
   "version": "1.0.0",
-  "description": "Serveur de matching pour Cococho",
+  "description": "Serveur de matching Cococho",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
