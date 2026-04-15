@@ -2,72 +2,75 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 let waitingUsers = [];
 
 io.on('connection', (socket) => {
-  console.log('✨ Nouveau visiteur connecté :', socket.id);
+  console.log('✨ Connecté :', socket.id);
 
   socket.on('requestNext', (data) => {
-    console.log(`🔎 Recherche pour ${socket.id} (PeerID: ${data.peerId})`);
-
+    // Nettoyage : on s'assure qu'il n'est plus dans la file d'attente
     waitingUsers = waitingUsers.filter(u => u.socketId !== socket.id);
+
     const partner = waitingUsers.find(u => u.socketId !== socket.id);
 
     if (partner) {
-      console.log(`💎 MATCH TROUVÉ : ${socket.id} <-> ${partner.socketId}`);
-      
+      console.log(`💎 MATCH : ${socket.id} <-> ${partner.socketId}`);
       waitingUsers = waitingUsers.filter(u => u.socketId !== partner.socketId);
 
-      // IMPORTANT : On envoie aussi le remoteSocketId pour que le chat sache où envoyer les messages
+      // On crée le lien de binôme sur le serveur pour le Auto-Next
+      socket.partnerId = partner.socketId;
+      const partnerSocket = io.sockets.sockets.get(partner.socketId);
+      if (partnerSocket) partnerSocket.partnerId = socket.id;
+
+      // Envoi des IDs
       io.to(socket.id).emit('matched', {
         remotePeerId: partner.peerId,
         remoteSocketId: partner.socketId,
-        matchedPseudo: partner.userId || 'Anonyme'
+        matchedPseudo: partner.userId
       });
 
       io.to(partner.socketId).emit('matched', {
         remotePeerId: data.peerId,
         remoteSocketId: socket.id,
-        matchedPseudo: data.userId || 'Anonyme'
+        matchedPseudo: data.userId
       });
     } else {
-      console.log(`⏳ ${socket.id} mis en attente...`);
       waitingUsers.push({
         socketId: socket.id,
         peerId: data.peerId,
-        userId: data.userId,
-        gender: data.gender,
-        filter: data.filter
+        userId: data.userId
       });
     }
   });
 
-  // --- SECTION CHAT TEXTUEL (AJOUTÉE) ---
   socket.on('send_message', (data) => {
-    // data doit contenir : { text, recipientSocketId }
     if (data.recipientSocketId) {
-      console.log(`✉️ Message de ${socket.id} vers ${data.recipientSocketId}`);
       io.to(data.recipientSocketId).emit('receive_message', {
         text: data.text,
-        sender: 'partner',
-        id: Date.now()
+        senderPseudo: data.senderPseudo,
+        timestamp: data.timestamp
       });
     }
   });
 
+  // GESTION DU DÉPART (AUTO-NEXT TRIGGER)
   socket.on('disconnect', () => {
+    if (socket.partnerId) {
+      io.to(socket.partnerId).emit('partner_disconnected');
+    }
     waitingUsers = waitingUsers.filter(u => u.socketId !== socket.id);
-    console.log('❌ Visiteur déconnecté :', socket.id);
+  });
+
+  socket.on('leave', () => {
+    if (socket.partnerId) {
+      io.to(socket.partnerId).emit('partner_disconnected');
+      socket.partnerId = null;
+    }
   });
 });
 
 const PORT = process.env.PORT || 10000;
-http.listen(PORT, () => {
-  console.log(`🚀 Serveur Cococho opérationnel avec Chat sur le port ${PORT}`);
-});
+http.listen(PORT, () => console.log(`🚀 Serveur actif sur le port ${PORT}`));
